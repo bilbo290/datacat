@@ -66,6 +66,83 @@ const server = new Server({
 // Global Datadog client
 let datadogClient: DatadogClient | null = null;
 
+// Query normalization function to convert natural language to Datadog syntax
+function normalizeQuery(query: string): string {
+  // If query already contains Datadog syntax (has colons), return as-is
+  if (query.includes(':') || query.includes('AND') || query.includes('OR')) {
+    return query;
+  }
+
+  // Convert natural language patterns to Datadog syntax
+  let normalizedQuery = query.toLowerCase();
+  
+  // Handle service-related queries with better wildcards
+  if (normalizedQuery.includes('service') || normalizedQuery.includes('api') || normalizedQuery.includes('server')) {
+    const serviceTerms = normalizedQuery
+      .replace(/\b(service|api|server)\b/g, '')
+      .replace(/\b(logs?|from|for|in|the|check|show|find)\b/g, '')
+      .trim()
+      .split(/\s+/)
+      .filter(term => term.length > 0);
+    
+    if (serviceTerms.length > 0) {
+      // Use broader wildcards for better matching
+      const serviceQuery = serviceTerms.map(term => `service:*${term}*`).join(' OR ');
+      const hasErrorTerms = normalizedQuery.includes('error') || normalizedQuery.includes('fail');
+      
+      if (hasErrorTerms) {
+        return `(${serviceQuery}) AND status:error`;
+      }
+      return serviceQuery;
+    }
+  }
+  
+  // Handle error-related queries with wildcards
+  if (normalizedQuery.includes('error') && !normalizedQuery.includes('service')) {
+    return 'status:error OR *error*';
+  }
+  
+  // Handle warning queries with wildcards  
+  if (normalizedQuery.includes('warn')) {
+    return 'status:warn OR *warn*';
+  }
+  
+  // Handle authentication/auth queries
+  if (normalizedQuery.includes('auth') || normalizedQuery.includes('login') || normalizedQuery.includes('token')) {
+    return '*auth* OR *login* OR *token*';
+  }
+  
+  // Handle database queries
+  if (normalizedQuery.includes('database') || normalizedQuery.includes('db') || normalizedQuery.includes('sql')) {
+    return '*database* OR *db* OR *sql*';
+  }
+  
+  // Handle payment queries
+  if (normalizedQuery.includes('payment') || normalizedQuery.includes('transaction')) {
+    return '*payment* OR *transaction*';
+  }
+  
+  // Handle specific terms that might be service names or general searches
+  const words = normalizedQuery.split(/\s+/).filter(word => 
+    word.length > 2 && 
+    !['logs', 'from', 'for', 'in', 'the', 'and', 'or', 'with', 'check', 'show', 'find', 'get'].includes(word)
+  );
+  
+  if (words.length > 0) {
+    // If it's a single meaningful word, search both service and content
+    if (words.length === 1) {
+      return `service:*${words[0]}* OR *${words[0]}*`;
+    }
+    // Multiple words - create comprehensive search with wildcards
+    const serviceSearch = words.map(word => `service:*${word}*`).join(' OR ');
+    const contentSearch = words.map(word => `*${word}*`).join(' AND ');
+    return `(${serviceSearch}) OR (${contentSearch})`;
+  }
+  
+  // Fallback to wildcard search if no patterns match
+  return `*${query}*`;
+}
+
 function getDatadogClient(): DatadogClient {
   if (!datadogClient) {
     const config: DatadogConfig = {
@@ -92,13 +169,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
       name: 'search_logs',
-      description: 'Search Datadog logs with filters, time ranges, and output formats. Use Datadog query syntax with facets like service:, status:, host:, etc.',
+      description: 'Search Datadog logs with filters, time ranges, and output formats. Automatically converts natural language queries to proper Datadog syntax (e.g., "member service" becomes "service:*member*").',
       inputSchema: {
         type: 'object',
         properties: {
           query: {
             type: 'string',
-            description: 'Datadog search query using facet syntax. Examples: "service:vb_integration" (for service), "status:error" (for errors), "host:prod-01" (for host), "@user.id:123" (for custom attributes), "service:web-app AND status:error" (multiple conditions). Use "*" for all logs.',
+            description: 'Search query - can be natural language or Datadog syntax. Examples: "member service" (searches service:*member*), "error logs" (searches status:error), "api server errors" (searches service:*api* AND status:error), or direct syntax like "service:web-app AND status:error".',
           },
           from: {
             type: 'string',
@@ -131,13 +208,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'tail_logs',
-      description: 'Stream recent logs or follow logs in real-time using Datadog query syntax',
+      description: 'Stream recent logs or follow logs in real-time. Supports natural language queries that are automatically converted to Datadog syntax.',
       inputSchema: {
         type: 'object',
         properties: {
           query: {
             type: 'string',
-            description: 'Datadog search query using facet syntax. Examples: "service:vb_integration", "status:error", "service:api AND @user.id:123"',
+            description: 'Search query - natural language or Datadog syntax. Examples: "member service", "api errors", "user authentication", or "service:vb_integration", "status:error"',
           },
           from: {
             type: 'string',
@@ -159,13 +236,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'export_logs',
-      description: 'Export logs to JSON or CSV files using Datadog query syntax',
+      description: 'Export logs to JSON or CSV files. Supports natural language queries converted to proper Datadog syntax.',
       inputSchema: {
         type: 'object',
         properties: {
           query: {
             type: 'string',
-            description: 'Datadog search query using facet syntax. Examples: "service:vb_integration", "status:error", "service:api AND host:prod-01"',
+            description: 'Search query - natural language or Datadog syntax. Examples: "member service errors", "payment api logs", or direct syntax like "service:api AND status:error"',
           },
           from: {
             type: 'string',
@@ -235,22 +312,28 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const validatedArgs = SearchLogsArgsSchema.parse(args);
         const client = getDatadogClient();
 
-        // Parse relative time ranges
-        let fromTime = validatedArgs.from;
-        let toTime = validatedArgs.to;
+        // Normalize the query for better natural language support
+        const normalizedQuery = normalizeQuery(validatedArgs.query);
 
+        // Parse time ranges properly
+        let fromTime: string;
+        let toTime: string;
+
+        // Check if 'from' is a relative time range (like '1h', '1d')
         const timeRange = client.parseTimeRange(validatedArgs.from);
         if (timeRange) {
+          // If 'from' is a relative range, use the parsed times
           fromTime = timeRange.from;
-          toTime = toTime || timeRange.to;
-        }
-
-        if (!toTime) {
-          toTime = new Date().toISOString();
+          // Only use the range's 'to' if user didn't specify a custom 'to'
+          toTime = validatedArgs.to || timeRange.to;
+        } else {
+          // If 'from' is an absolute time, use it directly
+          fromTime = validatedArgs.from;
+          toTime = validatedArgs.to || new Date().toISOString();
         }
 
         const searchOptions: LogSearchOptions = {
-          query: validatedArgs.query,
+          query: normalizedQuery,
           from: fromTime,
           to: toTime,
           limit: validatedArgs.limit,
@@ -260,12 +343,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         const response = await client.searchLogs(searchOptions);
 
+        // Show query translation if it was normalized
+        const queryInfo = normalizedQuery !== validatedArgs.query 
+          ? `Query: "${validatedArgs.query}" → "${normalizedQuery}"\n`
+          : '';
+        
+        // Show time range information
+        const timeInfo = `Time range: ${fromTime} to ${toTime}\n${queryInfo ? '\n' : ''}`;
+
         if (validatedArgs.outputFormat === 'json') {
           return {
             content: [
               {
                 type: "text",
-                text: JSON.stringify(response.data, null, 2),
+                text: `${queryInfo}${timeInfo}${JSON.stringify(response.data, null, 2)}`,
               },
             ],
           };
@@ -275,7 +366,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             content: [
               {
                 type: "text",
-                text: tableOutput,
+                text: `${queryInfo}${timeInfo}${tableOutput}`,
               },
             ],
           };
@@ -285,21 +376,30 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'tail_logs': {
         const validatedArgs = TailLogsArgsSchema.parse(args);
         const client = getDatadogClient();
+        const normalizedQuery = normalizeQuery(validatedArgs.query);
         const response = await client.tailLogs({
-          query: validatedArgs.query,
+          query: normalizedQuery,
           from: validatedArgs.from,
           follow: validatedArgs.follow,
           limit: validatedArgs.limit
         });
 
         const tableOutput = formatLogsAsTable(response.data);
+        const queryInfo = normalizedQuery !== validatedArgs.query 
+          ? `Query: "${validatedArgs.query}" → "${normalizedQuery}"\n`
+          : '';
+        
+        // Show time range for tail logs
+        const fromTime = validatedArgs.from || new Date(Date.now() - 60000).toISOString();
+        const toTime = new Date().toISOString();
+        const timeInfo = `Time range: ${fromTime} to ${toTime}\n${queryInfo ? '\n' : ''}`;
 
         if (validatedArgs.follow) {
           return {
             content: [
               {
                 type: "text",
-                text: `Following logs (showing latest ${response.data.length} entries):\n\n${tableOutput}\n\nNote: Real-time following requires streaming implementation.`,
+                text: `${queryInfo}${timeInfo}Following logs (showing latest ${response.data.length} entries):\n\n${tableOutput}\n\nNote: Real-time following requires streaming implementation.`,
               },
             ],
           };
@@ -309,7 +409,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: "text",
-              text: tableOutput,
+              text: `${queryInfo}${timeInfo}${tableOutput}`,
             },
           ],
         };
@@ -318,19 +418,27 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'export_logs': {
         const validatedArgs = ExportLogsArgsSchema.parse(args);
         const client = getDatadogClient();
+        const normalizedQuery = normalizeQuery(validatedArgs.query);
 
-        // Parse relative time ranges
-        let fromTime = validatedArgs.from;
-        let toTime = validatedArgs.to;
+        // Parse time ranges properly
+        let fromTime: string;
+        let toTime: string;
 
+        // Check if 'from' is a relative time range (like '1h', '1d')
         const timeRange = client.parseTimeRange(validatedArgs.from);
         if (timeRange) {
+          // If 'from' is a relative range, use the parsed times
           fromTime = timeRange.from;
-          toTime = timeRange.to;
+          // For export, user must provide 'to' parameter, but if they provided relative from, use range
+          toTime = validatedArgs.to;
+        } else {
+          // If 'from' is an absolute time, use both directly
+          fromTime = validatedArgs.from;
+          toTime = validatedArgs.to;
         }
 
         const searchOptions: LogSearchOptions = {
-          query: validatedArgs.query,
+          query: normalizedQuery,
           from: fromTime,
           to: toTime,
           limit: validatedArgs.limit,
@@ -360,11 +468,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           await csvWriter.writeRecords(csvData);
         }
 
+        const queryInfo = normalizedQuery !== validatedArgs.query 
+          ? `Query: "${validatedArgs.query}" → "${normalizedQuery}"\n`
+          : '';
+        
+        const timeInfo = `Time range: ${fromTime} to ${toTime}\n${queryInfo ? '\n' : ''}`;
+
         return {
           content: [
             {
               type: "text",
-              text: `Exported ${response.data.length} logs to ${outputFilename}`,
+              text: `${queryInfo}${timeInfo}Exported ${response.data.length} logs to ${outputFilename}`,
             },
           ],
         };
@@ -517,12 +631,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
-    process.stderr.write(`Tool execution error: ${errorMessage}\n`);
-
-    throw new McpError(
-      ErrorCode.InternalError,
-      `Tool execution failed: ${errorMessage}`
-    );
+    
+    // Return user-friendly error instead of throwing scary exceptions
+    return {
+      content: [
+        {
+          type: "text",
+          text: `❌ Error: ${errorMessage}\n\nTip: Check your Datadog credentials and query syntax. Use 'check_configuration' to verify your setup.`,
+        },
+      ],
+    };
   }
 });
 

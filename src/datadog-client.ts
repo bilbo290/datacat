@@ -53,7 +53,21 @@ export class DatadogClient {
 
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(`Datadog API error: ${response.status} ${response.statusText} - ${errorText}`);
+      let friendlyMessage = '';
+      
+      if (response.status === 401) {
+        friendlyMessage = 'Invalid API credentials. Please check your DD_API_KEY and DD_APP_KEY.';
+      } else if (response.status === 403) {
+        friendlyMessage = 'Access denied. Please verify your Datadog permissions and API key scopes.';
+      } else if (response.status === 429) {
+        friendlyMessage = 'Rate limit exceeded. Please wait a moment before trying again.';
+      } else if (response.status >= 500) {
+        friendlyMessage = 'Datadog service temporarily unavailable. Please try again later.';
+      } else {
+        friendlyMessage = `Request failed with status ${response.status}. ${errorText}`;
+      }
+      
+      throw new Error(friendlyMessage);
     }
 
     return response.json();
