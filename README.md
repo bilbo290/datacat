@@ -8,10 +8,10 @@ A server that provides AI assistants with tools to interact with Datadog logs th
 
 ## Features
 
-- **search_logs** - Search Datadog logs with filters, time ranges, and output formats (table/json)
-- **tail_logs** - Stream recent logs or follow logs in real-time
-- **export_logs** - Export logs to JSON/CSV files
-- **get_logs_by_trace_id** - Get all logs that share the same trace ID, sorted chronologically
+- **search_logs** - Search Datadog logs with filters, time ranges, and output formats. Shows trace IDs, user IDs, HTTP status codes and other key attributes when available
+- **tail_logs** - Stream recent logs or follow logs in real-time with enhanced attribute display
+- **export_logs** - Export logs to JSON/CSV files with comprehensive attribute coverage
+- **get_logs_by_trace_id** - Get all logs that share the same trace ID, sorted chronologically with full context
 - **get_time_range_suggestions** - Get common time range formats for queries
 - **get_query_examples** - Get example Datadog search query patterns
 - **check_configuration** - Verify Datadog API credentials and connectivity

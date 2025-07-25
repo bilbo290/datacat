@@ -11,7 +11,7 @@ import express from 'express';
 import cors from 'cors';
 import { createObjectCsvWriter } from 'csv-writer';
 import { DatadogClient } from './datadog-client.js';
-import { formatLogsAsTable, formatLogForCsv } from './formatters.js';
+import { formatLogsAsTable, formatLogsAsEnhancedTable, formatLogForCsv } from './formatters.js';
 import type {
   MCPServerOptions,
   DatadogConfig,
@@ -178,7 +178,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
       name: 'search_logs',
-      description: 'Search Datadog logs with filters, time ranges, and output formats. Automatically converts natural language queries to proper Datadog syntax (e.g., "member service" becomes "service:*member*").',
+      description: 'Search Datadog logs with filters, time ranges, and output formats. Shows key attributes including trace IDs, user IDs, HTTP status codes when available. Automatically converts natural language queries to proper Datadog syntax (e.g., "member service" becomes "service:*member*").',
       inputSchema: {
         type: 'object',
         properties: {
@@ -217,7 +217,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'tail_logs',
-      description: 'Stream recent logs or follow logs in real-time. Supports natural language queries that are automatically converted to Datadog syntax.',
+      description: 'Stream recent logs or follow logs in real-time. Shows key attributes including trace IDs, user IDs, HTTP status codes when available. Supports natural language queries that are automatically converted to Datadog syntax.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -311,7 +311,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'get_logs_by_trace_id',
-      description: 'Get all logs that share the same trace ID, sorted chronologically to show the flow of a request through the system',
+      description: 'Get all logs that share the same trace ID, sorted chronologically to show the flow of a request through the system. Shows key attributes including user IDs, HTTP status codes, error details when available.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -409,7 +409,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             ],
           };
         } else {
-          const tableOutput = formatLogsAsTable(response.data);
+          const tableOutput = formatLogsAsEnhancedTable(response.data);
           return {
             content: [
               {
@@ -432,7 +432,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           limit: validatedArgs.limit
         });
 
-        const tableOutput = formatLogsAsTable(response.data);
+        const tableOutput = formatLogsAsEnhancedTable(response.data);
         const queryInfo = normalizedQuery !== validatedArgs.query 
           ? `Query: "${validatedArgs.query}" → "${normalizedQuery}"\n`
           : '';
@@ -510,6 +510,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               { id: 'status', title: 'Status' },
               { id: 'service', title: 'Service' },
               { id: 'host', title: 'Host' },
+              { id: 'trace_id', title: 'Trace ID' },
+              { id: 'user_id', title: 'User ID' },
+              { id: 'http_status_code', title: 'HTTP Status' },
               { id: 'tags', title: 'Tags' },
             ],
           });
@@ -729,7 +732,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             ],
           };
         } else {
-          const tableOutput = formatLogsAsTable(response.data);
+          const tableOutput = formatLogsAsEnhancedTable(response.data);
           return {
             content: [
               {
