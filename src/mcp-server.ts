@@ -53,6 +53,15 @@ const GetQueryExamplesArgsSchema = z.object({
   category: z.enum(['basic', 'advanced', 'facet']).optional().describe("Type of query examples to return")
 });
 
+const GetLogsByTraceIdArgsSchema = z.object({
+  traceId: z.string().describe("Trace ID to search for (e.g., '1234567890abcdef')"),
+  from: z.string().optional().describe("Start time in RFC3339 format or relative time (e.g., '1h', '1d'). Defaults to last 24 hours"),
+  to: z.string().optional().describe("End time in RFC3339 format (defaults to now if not specified)"),
+  limit: z.number().optional().default(1000).describe("Maximum number of logs to return (default: 1000, max: 1000)"),
+  sort: z.enum(['asc', 'desc']).optional().default('asc').describe("Sort order by timestamp (default: asc for trace flow)"),
+  outputFormat: z.enum(['table', 'json']).optional().default('table').describe("Output format (default: table)")
+});
+
 // Create server instance
 const server = new Server({
   name: "datacat-datadog-server",
@@ -298,6 +307,45 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       inputSchema: {
         type: 'object',
         properties: {},
+      },
+    },
+    {
+      name: 'get_logs_by_trace_id',
+      description: 'Get all logs that share the same trace ID, sorted chronologically to show the flow of a request through the system',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          traceId: {
+            type: 'string',
+            description: 'Trace ID to search for (e.g., "1234567890abcdef")',
+          },
+          from: {
+            type: 'string',
+            description: 'Start time in RFC3339 format or relative time (e.g., "1h", "1d"). Defaults to last 24 hours',
+          },
+          to: {
+            type: 'string',
+            description: 'End time in RFC3339 format (defaults to now if not specified)',
+          },
+          limit: {
+            type: 'number',
+            description: 'Maximum number of logs to return (default: 1000, max: 1000)',
+            default: 1000,
+          },
+          sort: {
+            type: 'string',
+            enum: ['asc', 'desc'],
+            description: 'Sort order by timestamp (default: asc for trace flow)',
+            default: 'asc',
+          },
+          outputFormat: {
+            type: 'string',
+            enum: ['table', 'json'],
+            description: 'Output format (default: table)',
+            default: 'table',
+          },
+        },
+        required: ['traceId'],
       },
     },
   ],
@@ -559,6 +607,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               description: 'Logs that have a trace ID',
             },
             {
+              query: '@trace_id:"1234567890abcdef"',
+              description: 'Get all logs for a specific trace ID (use get_logs_by_trace_id tool for better formatting)',
+            },
+            {
               query: '@error.kind:"TimeoutException"',
               description: 'Filter by error type facet',
             },
@@ -616,6 +668,73 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                     message: errorMessage,
                   },
                 }, null, 2),
+              },
+            ],
+          };
+        }
+      }
+
+      case 'get_logs_by_trace_id': {
+        const validatedArgs = GetLogsByTraceIdArgsSchema.parse(args);
+        const client = getDatadogClient();
+
+        // Build the trace ID query using Datadog's facet syntax
+        const query = `@trace_id:"${validatedArgs.traceId}"`;
+
+        // Handle time range - default to last 24 hours if not specified
+        let fromTime: string;
+        let toTime: string;
+
+        if (validatedArgs.from) {
+          // Parse time ranges properly
+          const timeRange = client.parseTimeRange(validatedArgs.from);
+          if (timeRange) {
+            fromTime = timeRange.from;
+            toTime = validatedArgs.to || timeRange.to;
+          } else {
+            fromTime = validatedArgs.from;
+            toTime = validatedArgs.to || new Date().toISOString();
+          }
+        } else {
+          // Default to last 24 hours
+          const now = new Date();
+          const dayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+          fromTime = dayAgo.toISOString();
+          toTime = validatedArgs.to || now.toISOString();
+        }
+
+        const searchOptions: LogSearchOptions = {
+          query: query,
+          from: fromTime,
+          to: toTime,
+          limit: validatedArgs.limit,
+          sort: validatedArgs.sort,
+          outputFormat: validatedArgs.outputFormat
+        };
+
+        const response = await client.searchLogs(searchOptions);
+
+        // Show trace ID and time range information
+        const traceInfo = `Trace ID: ${validatedArgs.traceId}\n`;
+        const timeInfo = `Time range: ${fromTime} to ${toTime}\n`;
+        const countInfo = `Found ${response.data.length} log entries for this trace\n\n`;
+
+        if (validatedArgs.outputFormat === 'json') {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `${traceInfo}${timeInfo}${countInfo}${JSON.stringify(response.data, null, 2)}`,
+              },
+            ],
+          };
+        } else {
+          const tableOutput = formatLogsAsTable(response.data);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `${traceInfo}${timeInfo}${countInfo}${tableOutput}`,
               },
             ],
           };

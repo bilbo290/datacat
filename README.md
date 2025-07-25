@@ -11,6 +11,7 @@ A server that provides AI assistants with tools to interact with Datadog logs th
 - **search_logs** - Search Datadog logs with filters, time ranges, and output formats (table/json)
 - **tail_logs** - Stream recent logs or follow logs in real-time
 - **export_logs** - Export logs to JSON/CSV files
+- **get_logs_by_trace_id** - Get all logs that share the same trace ID, sorted chronologically
 - **get_time_range_suggestions** - Get common time range formats for queries
 - **get_query_examples** - Get example Datadog search query patterns
 - **check_configuration** - Verify Datadog API credentials and connectivity
@@ -187,6 +188,11 @@ Once configured with Claude, you can use natural language to interact with your 
 "Show me examples of Datadog query syntax I can use"
 ```
 
+**Track a request by trace ID:**
+```
+"Show me all logs for trace ID abc123def456 from the last 2 hours"
+```
+
 ### Available Tools
 
 When properly configured, Claude will have access to these tools:
@@ -196,6 +202,7 @@ When properly configured, Claude will have access to these tools:
 | `search_logs` | Search and filter logs | "Find logs from service:api" |
 | `tail_logs` | Stream recent logs | "Show recent logs from my service" |
 | `export_logs` | Export to JSON/CSV | "Export error logs to CSV" |
+| `get_logs_by_trace_id` | Get all logs for a trace | "Show me all logs for trace abc123" |
 | `get_time_range_suggestions` | Get time formats | "What time ranges can I use?" |
 | `get_query_examples` | Get query examples | "Show me query examples" |
 | `check_configuration` | Verify connection | "Check my Datadog connection" |
@@ -261,6 +268,18 @@ Get example Datadog search query patterns.
 
 **Parameters:**
 - `category` (optional) - Type of query examples: "basic", "advanced", or "facet"
+
+### get_logs_by_trace_id
+
+Get all logs that share the same trace ID, sorted chronologically to show the flow of a request through the system.
+
+**Parameters:**
+- `traceId` (required) - Trace ID to search for (e.g., "1234567890abcdef")
+- `from` (optional) - Start time in RFC3339 format or relative time (e.g., "1h", "1d"). Defaults to last 24 hours
+- `to` (optional) - End time in RFC3339 format (defaults to now if not specified)
+- `limit` (optional) - Maximum number of logs to return (default: 1000, max: 1000)
+- `sort` (optional) - Sort order by timestamp: "asc" or "desc" (default: "asc" for trace flow)
+- `outputFormat` (optional) - Output format: "table" or "json" (default: "table")
 
 ### check_configuration
 
