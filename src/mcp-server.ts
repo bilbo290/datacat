@@ -607,7 +607,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               description: 'Logs that have a trace ID',
             },
             {
-              query: '@trace_id:"1234567890abcdef"',
+              query: '@trace_id:1234567890abcdef',
               description: 'Get all logs for a specific trace ID (use get_logs_by_trace_id tool for better formatting)',
             },
             {
@@ -679,7 +679,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const client = getDatadogClient();
 
         // Build the trace ID query using Datadog's facet syntax
-        const query = `@trace_id:"${validatedArgs.traceId}"`;
+        const query = `@trace_id:${validatedArgs.traceId}`;
 
         // Handle time range - default to last 24 hours if not specified
         let fromTime: string;
