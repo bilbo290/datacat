@@ -164,10 +164,16 @@ export class DatadogClient {
     const now = new Date();
     const ranges: Record<string, Date> = {
       '1h': new Date(now.getTime() - 60 * 60 * 1000),
+      '2h': new Date(now.getTime() - 2 * 60 * 60 * 1000),
       '4h': new Date(now.getTime() - 4 * 60 * 60 * 1000),
+      '6h': new Date(now.getTime() - 6 * 60 * 60 * 1000),
+      '12h': new Date(now.getTime() - 12 * 60 * 60 * 1000),
+      '24h': new Date(now.getTime() - 24 * 60 * 60 * 1000),
       '1d': new Date(now.getTime() - 24 * 60 * 60 * 1000),
+      '2d': new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000),
       '3d': new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000),
       '7d': new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000),
+      '14d': new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000),
       '30d': new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
     };
 

@@ -311,10 +311,16 @@ Verify Datadog API credentials and connectivity. No parameters required.
 
 ### Relative Time Ranges
 - `1h` - Last 1 hour
+- `2h` - Last 2 hours
 - `4h` - Last 4 hours
-- `1d` - Last 1 day
+- `6h` - Last 6 hours
+- `12h` - Last 12 hours
+- `24h` - Last 24 hours
+- `1d` - Last 1 day (same as 24h)
+- `2d` - Last 2 days
 - `3d` - Last 3 days
 - `7d` - Last 7 days
+- `14d` - Last 14 days
 - `30d` - Last 30 days
 
 ### Absolute Time Ranges

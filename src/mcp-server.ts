@@ -539,10 +539,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const suggestions = {
           relative: [
             { value: '1h', description: 'Last 1 hour' },
+            { value: '2h', description: 'Last 2 hours' },
             { value: '4h', description: 'Last 4 hours' },
-            { value: '1d', description: 'Last 1 day' },
+            { value: '6h', description: 'Last 6 hours' },
+            { value: '12h', description: 'Last 12 hours' },
+            { value: '24h', description: 'Last 24 hours' },
+            { value: '1d', description: 'Last 1 day (same as 24h)' },
+            { value: '2d', description: 'Last 2 days' },
             { value: '3d', description: 'Last 3 days' },
             { value: '7d', description: 'Last 7 days' },
+            { value: '14d', description: 'Last 14 days' },
             { value: '30d', description: 'Last 30 days' },
           ],
           absolute: [
