@@ -1,0 +1,47 @@
+{
+  "name": "datacat",
+  "version": "1.0.0",
+  "description": "AI assistant tools for interacting with Datadog logs via MCP protocol",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "npm run build && node dist/index.js",
+    "mcp": "npm run build && node dist/index.js mcp",
+    "dev": "tsc --watch & nodemon dist/index.js",
+    "clean": "rm -rf dist"
+  },
+  "bin": {
+    "datacat": "./dist/index.js"
+  },
+  "keywords": ["datadog", "logs", "mcp", "ai", "assistant", "claude", "model-context-protocol"],
+  "author": "",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yourusername/datacat.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yourusername/datacat/issues"
+  },
+  "homepage": "https://github.com/yourusername/datacat#readme",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^0.6.0",
+    "commander": "^12.0.0",
+    "node-fetch": "^3.3.2",
+    "csv-writer": "^1.6.0",
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "zod": "^3.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/express": "^4.17.21",
+    "@types/cors": "^2.8.17",
+    "typescript": "^5.3.0",
+    "nodemon": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

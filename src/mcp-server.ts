@@ -1,0 +1,584 @@
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import {
+  CallToolRequestSchema,
+  ErrorCode,
+  ListToolsRequestSchema,
+  McpError,
+} from "@modelcontextprotocol/sdk/types.js";
+import { z } from "zod";
+import express from 'express';
+import cors from 'cors';
+import { createObjectCsvWriter } from 'csv-writer';
+import { DatadogClient } from './datadog-client.js';
+import { formatLogsAsTable, formatLogForCsv } from './formatters.js';
+import type {
+  MCPServerOptions,
+  DatadogConfig,
+  LogSearchOptions,
+  LogTailOptions,
+  LogExportOptions
+} from './types.js';
+
+const DATADOG_API_BASE = "https://api.datadoghq.com";
+const USER_AGENT = "datacat/1.0.0";
+
+// Zod schemas for tool arguments validation
+const SearchLogsArgsSchema = z.object({
+  query: z.string().describe("Datadog search query using facet syntax (e.g., 'service:vb_integration', 'status:error', 'service:api AND host:prod-01')"),
+  from: z.string().describe("Start time in RFC3339 format or relative time (e.g., '1h', '1d')"),
+  to: z.string().optional().describe("End time in RFC3339 format (defaults to now if not specified)"),
+  limit: z.number().optional().default(1000).describe("Maximum number of logs to return (default: 1000, max: 1000)"),
+  sort: z.enum(['asc', 'desc']).optional().default('desc').describe("Sort order by timestamp (default: desc)"),
+  outputFormat: z.enum(['table', 'json']).optional().default('table').describe("Output format (default: table)")
+});
+
+const TailLogsArgsSchema = z.object({
+  query: z.string().describe("Datadog search query using facet syntax (e.g., 'service:vb_integration', 'status:error')"),
+  from: z.string().optional().describe("Start time (defaults to 1 minute ago)"),
+  follow: z.boolean().optional().default(false).describe("Whether to follow logs in real-time (default: false)"),
+  limit: z.number().optional().default(1000).describe("Maximum number of logs to return per request (default: 1000)")
+});
+
+const ExportLogsArgsSchema = z.object({
+  query: z.string().describe("Datadog search query using facet syntax (e.g., 'service:vb_integration', 'status:error')"),
+  from: z.string().describe("Start time in RFC3339 format or relative time"),
+  to: z.string().describe("End time in RFC3339 format"),
+  format: z.enum(['json', 'csv']).describe("Export format"),
+  filename: z.string().optional().describe("Output filename (optional, will generate if not provided)"),
+  limit: z.number().optional().default(1000).describe("Maximum number of logs to export (default: 1000)")
+});
+
+const GetQueryExamplesArgsSchema = z.object({
+  category: z.enum(['basic', 'advanced', 'facet']).optional().describe("Type of query examples to return")
+});
+
+// Create server instance
+const server = new Server({
+  name: "datacat-datadog-server",
+  version: "1.0.0",
+}, {
+  capabilities: {
+    tools: {},
+  },
+});
+
+// Global Datadog client
+let datadogClient: DatadogClient | null = null;
+
+function getDatadogClient(): DatadogClient {
+  if (!datadogClient) {
+    const config: DatadogConfig = {
+      apiKey: process.env.DD_API_KEY || '',
+      appKey: process.env.DD_APP_KEY || '',
+      region: process.env.DD_REGION || 'us1',
+    };
+
+    if (!config.apiKey || !config.appKey) {
+      throw new McpError(
+        ErrorCode.InvalidRequest,
+        'Missing required environment variables: DD_API_KEY and DD_APP_KEY must be set'
+      );
+    }
+
+    datadogClient = new DatadogClient(config);
+  }
+
+  return datadogClient;
+}
+
+// Setup tool handlers
+server.setRequestHandler(ListToolsRequestSchema, async () => ({
+  tools: [
+    {
+      name: 'search_logs',
+      description: 'Search Datadog logs with filters, time ranges, and output formats. Use Datadog query syntax with facets like service:, status:, host:, etc.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: {
+            type: 'string',
+            description: 'Datadog search query using facet syntax. Examples: "service:vb_integration" (for service), "status:error" (for errors), "host:prod-01" (for host), "@user.id:123" (for custom attributes), "service:web-app AND status:error" (multiple conditions). Use "*" for all logs.',
+          },
+          from: {
+            type: 'string',
+            description: 'Start time in RFC3339 format or relative time (e.g., "1h", "1d")',
+          },
+          to: {
+            type: 'string',
+            description: 'End time in RFC3339 format (defaults to now if not specified)',
+          },
+          limit: {
+            type: 'number',
+            description: 'Maximum number of logs to return (default: 1000, max: 1000)',
+            default: 1000,
+          },
+          sort: {
+            type: 'string',
+            enum: ['asc', 'desc'],
+            description: 'Sort order by timestamp (default: desc)',
+            default: 'desc',
+          },
+          outputFormat: {
+            type: 'string',
+            enum: ['table', 'json'],
+            description: 'Output format (default: table)',
+            default: 'table',
+          },
+        },
+        required: ['query', 'from'],
+      },
+    },
+    {
+      name: 'tail_logs',
+      description: 'Stream recent logs or follow logs in real-time using Datadog query syntax',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: {
+            type: 'string',
+            description: 'Datadog search query using facet syntax. Examples: "service:vb_integration", "status:error", "service:api AND @user.id:123"',
+          },
+          from: {
+            type: 'string',
+            description: 'Start time (defaults to 1 minute ago)',
+          },
+          follow: {
+            type: 'boolean',
+            description: 'Whether to follow logs in real-time (default: false)',
+            default: false,
+          },
+          limit: {
+            type: 'number',
+            description: 'Maximum number of logs to return per request (default: 1000)',
+            default: 1000,
+          },
+        },
+        required: ['query'],
+      },
+    },
+    {
+      name: 'export_logs',
+      description: 'Export logs to JSON or CSV files using Datadog query syntax',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: {
+            type: 'string',
+            description: 'Datadog search query using facet syntax. Examples: "service:vb_integration", "status:error", "service:api AND host:prod-01"',
+          },
+          from: {
+            type: 'string',
+            description: 'Start time in RFC3339 format or relative time',
+          },
+          to: {
+            type: 'string',
+            description: 'End time in RFC3339 format',
+          },
+          format: {
+            type: 'string',
+            enum: ['json', 'csv'],
+            description: 'Export format',
+          },
+          filename: {
+            type: 'string',
+            description: 'Output filename (optional, will generate if not provided)',
+          },
+          limit: {
+            type: 'number',
+            description: 'Maximum number of logs to export (default: 1000)',
+            default: 1000,
+          },
+        },
+        required: ['query', 'from', 'to', 'format'],
+      },
+    },
+    {
+      name: 'get_time_range_suggestions',
+      description: 'Get common time range formats for queries',
+      inputSchema: {
+        type: 'object',
+        properties: {},
+      },
+    },
+    {
+      name: 'get_query_examples',
+      description: 'Get example Datadog search query patterns',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          category: {
+            type: 'string',
+            enum: ['basic', 'advanced', 'facet'],
+            description: 'Type of query examples to return',
+          },
+        },
+      },
+    },
+    {
+      name: 'check_configuration',
+      description: 'Verify Datadog API credentials and connectivity',
+      inputSchema: {
+        type: 'object',
+        properties: {},
+      },
+    },
+  ],
+}));
+
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  try {
+    const { name, arguments: args } = request.params;
+
+    switch (name) {
+      case 'search_logs': {
+        const validatedArgs = SearchLogsArgsSchema.parse(args);
+        const client = getDatadogClient();
+
+        // Parse relative time ranges
+        let fromTime = validatedArgs.from;
+        let toTime = validatedArgs.to;
+
+        const timeRange = client.parseTimeRange(validatedArgs.from);
+        if (timeRange) {
+          fromTime = timeRange.from;
+          toTime = toTime || timeRange.to;
+        }
+
+        if (!toTime) {
+          toTime = new Date().toISOString();
+        }
+
+        const searchOptions: LogSearchOptions = {
+          query: validatedArgs.query,
+          from: fromTime,
+          to: toTime,
+          limit: validatedArgs.limit,
+          sort: validatedArgs.sort,
+          outputFormat: validatedArgs.outputFormat
+        };
+
+        const response = await client.searchLogs(searchOptions);
+
+        if (validatedArgs.outputFormat === 'json') {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify(response.data, null, 2),
+              },
+            ],
+          };
+        } else {
+          const tableOutput = formatLogsAsTable(response.data);
+          return {
+            content: [
+              {
+                type: "text",
+                text: tableOutput,
+              },
+            ],
+          };
+        }
+      }
+
+      case 'tail_logs': {
+        const validatedArgs = TailLogsArgsSchema.parse(args);
+        const client = getDatadogClient();
+        const response = await client.tailLogs({
+          query: validatedArgs.query,
+          from: validatedArgs.from,
+          follow: validatedArgs.follow,
+          limit: validatedArgs.limit
+        });
+
+        const tableOutput = formatLogsAsTable(response.data);
+
+        if (validatedArgs.follow) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Following logs (showing latest ${response.data.length} entries):\n\n${tableOutput}\n\nNote: Real-time following requires streaming implementation.`,
+              },
+            ],
+          };
+        }
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: tableOutput,
+            },
+          ],
+        };
+      }
+
+      case 'export_logs': {
+        const validatedArgs = ExportLogsArgsSchema.parse(args);
+        const client = getDatadogClient();
+
+        // Parse relative time ranges
+        let fromTime = validatedArgs.from;
+        let toTime = validatedArgs.to;
+
+        const timeRange = client.parseTimeRange(validatedArgs.from);
+        if (timeRange) {
+          fromTime = timeRange.from;
+          toTime = timeRange.to;
+        }
+
+        const searchOptions: LogSearchOptions = {
+          query: validatedArgs.query,
+          from: fromTime,
+          to: toTime,
+          limit: validatedArgs.limit,
+        };
+
+        const response = await client.searchLogs(searchOptions);
+
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const outputFilename = validatedArgs.filename || `datadog-logs-${timestamp}.${validatedArgs.format}`;
+
+        if (validatedArgs.format === 'json') {
+          const fs = await import('fs/promises');
+          await fs.writeFile(outputFilename, JSON.stringify(response.data, null, 2));
+        } else if (validatedArgs.format === 'csv') {
+          const csvData = response.data.map(formatLogForCsv);
+          const csvWriter = createObjectCsvWriter({
+            path: outputFilename,
+            header: [
+              { id: 'timestamp', title: 'Timestamp' },
+              { id: 'message', title: 'Message' },
+              { id: 'status', title: 'Status' },
+              { id: 'service', title: 'Service' },
+              { id: 'host', title: 'Host' },
+              { id: 'tags', title: 'Tags' },
+            ],
+          });
+          await csvWriter.writeRecords(csvData);
+        }
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Exported ${response.data.length} logs to ${outputFilename}`,
+            },
+          ],
+        };
+      }
+
+      case 'get_time_range_suggestions': {
+        const suggestions = {
+          relative: [
+            { value: '1h', description: 'Last 1 hour' },
+            { value: '4h', description: 'Last 4 hours' },
+            { value: '1d', description: 'Last 1 day' },
+            { value: '3d', description: 'Last 3 days' },
+            { value: '7d', description: 'Last 7 days' },
+            { value: '30d', description: 'Last 30 days' },
+          ],
+          absolute: [
+            {
+              format: 'RFC3339',
+              example: '2024-01-15T10:00:00Z',
+              description: 'ISO 8601 format with timezone',
+            },
+            {
+              format: 'Unix timestamp',
+              example: '1642248000',
+              description: 'Unix timestamp in seconds',
+            },
+          ],
+        };
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(suggestions, null, 2),
+            },
+          ],
+        };
+      }
+
+      case 'get_query_examples': {
+        const validatedArgs = GetQueryExamplesArgsSchema.parse(args || {});
+        const allExamples = {
+          basic: [
+            { query: 'service:vb_integration', description: 'Find logs from vb_integration service' },
+            { query: 'status:error', description: 'Find error logs' },
+            { query: 'host:prod-server-01', description: 'Find logs from specific host' },
+            { query: 'ERROR', description: 'Find logs containing "ERROR" text' },
+          ],
+          advanced: [
+            {
+              query: 'service:vb_integration AND status:error',
+              description: 'Find errors from vb_integration service',
+            },
+            {
+              query: 'service:(vb_integration OR api-server)',
+              description: 'Find logs from multiple services',
+            },
+            {
+              query: 'service:vb_integration -status:info',
+              description: 'Find vb_integration logs excluding info level',
+            },
+            {
+              query: '@duration:>1000',
+              description: 'Find logs with custom attribute duration > 1000ms',
+            },
+          ],
+          facet: [
+            {
+              query: '@http.status_code:500',
+              description: 'Filter by HTTP status code facet',
+            },
+            {
+              query: '@user.id:"123456"',
+              description: 'Filter by user ID facet',
+            },
+            {
+              query: '@trace_id:*',
+              description: 'Logs that have a trace ID',
+            },
+            {
+              query: '@error.kind:"TimeoutException"',
+              description: 'Filter by error type facet',
+            },
+          ],
+        };
+
+        const examples = validatedArgs.category ? allExamples[validatedArgs.category] : allExamples;
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(examples, null, 2),
+            },
+          ],
+        };
+      }
+
+      case 'check_configuration': {
+        try {
+          const client = getDatadogClient();
+          const status = await client.checkConnection();
+
+          const config = {
+            apiKey: process.env.DD_API_KEY ? '***configured***' : 'NOT SET',
+            appKey: process.env.DD_APP_KEY ? '***configured***' : 'NOT SET',
+            region: process.env.DD_REGION || 'us1 (default)',
+          };
+
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  configuration: config,
+                  connectivity: status,
+                }, null, 2),
+              },
+            ],
+          };
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  configuration: {
+                    apiKey: process.env.DD_API_KEY ? '***configured***' : 'NOT SET',
+                    appKey: process.env.DD_APP_KEY ? '***configured***' : 'NOT SET',
+                    region: process.env.DD_REGION || 'us1 (default)',
+                  },
+                  connectivity: {
+                    status: 'error',
+                    message: errorMessage,
+                  },
+                }, null, 2),
+              },
+            ],
+          };
+        }
+      }
+
+      default:
+        throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
+    }
+  } catch (error) {
+    if (error instanceof McpError) {
+      throw error;
+    }
+
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+    process.stderr.write(`Tool execution error: ${errorMessage}\n`);
+
+    throw new McpError(
+      ErrorCode.InternalError,
+      `Tool execution failed: ${errorMessage}`
+    );
+  }
+});
+
+// Error handling
+server.onerror = (error) => {
+  process.stderr.write(`MCP Server Error: ${error}\n`);
+};
+
+// Export start function
+export async function startMCPServer(options: MCPServerOptions): Promise<void> {
+  if (options.transport === 'stdio') {
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+    process.stderr.write('Datadog MCP server running on stdio transport\n');
+  } else if (options.transport === 'sse') {
+    // For SSE, we'll implement a basic HTTP server
+    const app = express();
+    app.use(cors());
+    app.use(express.json());
+
+    // Add health check endpoint
+    app.get('/health', (req, res) => {
+      res.json({ status: 'healthy', service: 'datacat-datadog-server' });
+    });
+
+    // Basic SSE endpoint
+    app.get('/datadog/sse', (req, res) => {
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Headers': 'Cache-Control'
+      });
+
+      res.write('event: message\n');
+      res.write('data: {"jsonrpc":"2.0","method":"notifications/initialized"}\n\n');
+
+      const keepAlive = setInterval(() => {
+        res.write(': keep-alive\n\n');
+      }, 30000);
+
+      req.on('close', () => {
+        clearInterval(keepAlive);
+      });
+    });
+
+    const port = options.port ? parseInt(options.port, 10) : 9005;
+
+    return new Promise<void>((resolve) => {
+      app.listen(port, () => {
+        process.stderr.write(`Datadog MCP server running on http://localhost:${port}/datadog\n`);
+        process.stderr.write(`Health check available at http://localhost:${port}/health\n`);
+        process.stderr.write(`Note: For full MCP support, use stdio transport\n`);
+        resolve();
+      });
+    });
+  }
+}
